@@ -24,6 +24,12 @@
  * This file is part of the TinyUSB stack.
  */
 
+// HCD file following example: /src/portable/<vendor>/<chip_family>/hcd_<chip_family>.c
+// /src/portable/aft/aftx07/hcd_aftx07.c
+
+// usb register definitions in /hw/mcu/intel/de2_115/usb_pal.h
+// board support package  in /hw/bsp/intel/de2_115/
+
 #include "tusb_option.h"
 #include "usb_pal.h"
 
