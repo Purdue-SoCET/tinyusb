@@ -6,6 +6,8 @@
 #define __IO volatile
 #define __I  volatile const
 
+#define USB_PLIC_SRC  (17)   // <-- PUT IN PAL.H AFT WHEN ITS DEFINED 17 is a temporary number
+
 /* --- Bitfield Definitions --- */
 
 typedef struct {

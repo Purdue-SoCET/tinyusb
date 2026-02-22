@@ -32,6 +32,7 @@
 
 #include "tusb_option.h"
 #include "usb_pal.h"
+#include "pal.h"
 
 // #if CFG_TUH_ENABLED && CFG_TUSB_MCU == OPT_MCU_NONE
 
@@ -39,6 +40,16 @@
 #include "host/usbh.h"
 
 #include <stdint.h>
+
+typedef struct {
+    bool busy;
+    uint8_t dev_addr;
+    uint8_t ep_addr;      // includes direction bit
+    uint16_t total_len;
+    bool in;              // direction (true = IN)
+} usb_xfer_ctx_t;
+
+static volatile usb_xfer_ctx_t g_xfer;
 
 //--------------------------------------------------------------------+
 // Controller API
@@ -93,18 +104,70 @@ void hcd_int_handler(uint8_t rhport, bool in_isr)
     (void)in_isr;
 
     // read IRQ_STS to see what kind of interrupt was fired
-    uint32_t interrupt_status = USB_HOST->IRQ_STS.val;
+    uint32_t interrupt_status = USB_HOST->IRQ_STS.val & USB_HOST->IRQ_MASK.val;
 
     // device detected
     if (interrupt_status & USB_IRQ_DEVICE_DETECT){
-        hcd_event_device_attach(rhport, in_isr); // tusb helper function to notify upper layers of event
-        USB_HOST->IRQ_ACK.val = USB_IRQ_DEVICE_DETECT; // clear interrupt
+        if (USB_HOST->STATUS.bits.linestate != 0){
+            hcd_event_device_attach(rhport, in_isr); // tusb helper function to notify upper layers of event
+        }
 
-        // SHOULD WE ENABLE SOF immediately or only when first transfer begins?
-        // USB_HOST->CTRL.bits.enable_sof = 1; // enable SOF packet generation
+        USB_HOST->IRQ_ACK.val = USB_IRQ_DEVICE_DETECT; // clear interrupt
+    }
+    
+    // DONE interrupt (when transfer completed), notify TUSB and read USB_RX_STAT
+
+    if (interrupt_status & USB_IRQ_DONE){
+        // Read USB_RX_STAT to determine parameters for hcd_event_xfer_complete
+        // hcd_event_xfer_complete(uint8_t dev_addr, uint8_t ep_addr, uint32_t xferred_bytes, xfer_result_t result, bool in_isr)
+        // hcd_event_xfer_complete tells TinyUSB, transfer finished, here is result and how many bytes transferred (notifies host stack hardware is done)
+        uint32_t rx_stat = USB_HOST->RX_STAT.val;
+        xfer_result_t result = XFER_RESULT_SUCCESS;
+
+        // check error flags in RX_STAT
+        if (rx_stat & (1u << 30)){         // CRC ERROR
+            result = XFER_RESULT_FAILED;
+        } else if (rx_stat & (1u << 29)){  // RESP_TIMEOUT
+            result = XFER_RESULT_FAILED;
+        } else {
+            uint8_t resp_pid = (rx_stat >> 16) & 0xFF; // RESP_BITS
+
+            if(resp_pid == 0x1E){ // STALL: 0001_1110 [3:0] is the actual PID [7:4] is the complement
+                result = XFER_RESULT_STALLED;
+            }
+        }
+
+        // determine transferred length
+        uint16_t actual_len = 0;
+
+        if(g_xfer.in){
+            // IN transfers, use the recieved count
+            actual_len = (uint16_t)(rx_stat & 0xFFFF);
+        } else {
+            // OUT transfers assume full length on success
+            if (result == XFER_RESULT_SUCCESS){
+                actual_len = g_xfer.total_len;
+            } else {
+                actual_len = 0;
+            }
+        }
+
+        // tell TUSB
+        if (g_xfer.busy){
+            hcd_event_xfer_complete(
+                g_xfer.dev_addr,
+                g_xfer.ep_addr,
+                actual_len,
+                result,
+                in_isr
+            );
+            g_xfer.busy = false;
+        }
+
+        // ACK interrupt
+        USB_HOST->IRQ_ACK.val = USB_IRQ_DONE;
     }
 
-    // DONE interrupt (when transfer completed)
 
     // ERROR interrupt
 }
@@ -112,9 +175,28 @@ void hcd_int_handler(uint8_t rhport, bool in_isr)
 // Enable USB interrupt
 void hcd_int_enable(uint8_t rhport)
 {
-    // some AFT stuff??
     (void)rhport;
 
+    // USB peripheral interrupt enabled
+    // interrupt controller is configured (PLIC)
+    // CPU global interrupts enabled
+    uint32_t usb_mask = USB_IRQ_DEVICE_DETECT | USB_IRQ_DONE | USB_IRQ_ERR | USB_IRQ_SOF;
+    USB_HOST->IRQ_ACK.val  = usb_mask; // clear out interrupts
+    USB_HOST->IRQ_MASK.val = usb_mask; // enable all interrupts
+
+    // enable PLIC source
+    uint32_t src = USB_PLIC_SRC;
+    uint32_t ctx = 0;
+    
+    // make > 0 or it wont fire
+    *PLIC_PRIORITY(PLIC_BASE, src) = 1;
+
+    // enable bit (32 bit word covers 32 sources)
+    volatile uint32_t *en = PLIC_ENABLE(PLIC_BASE, src, ctx);
+    *en |= (1u << (src % 32));
+
+    // allow priorities >= 1
+    *PLIC_PRIORITY_THRESHOLD(PLIC_BASE, ctx) = 0;
 }
 
 // Disable USB interrupt
@@ -177,6 +259,10 @@ void hcd_port_reset_end(uint8_t rhport)
 
     // 3. Flush the FIFO to ensure we start with a clean state for enumeration
     USB_HOST->CTRL.bits.tx_flush = 1;
+
+    // enable SOF packets on wire
+    USB_HOST->CTRL.bits.enable_sof = 1; // enable SOF packet generation
+
 }
 
 // Get port link speed
@@ -245,6 +331,16 @@ bool hcd_edpt_xfer(uint8_t rhport, uint8_t dev_addr, uint8_t ep_addr, uint8_t *b
     (void)ep_addr;
     (void)buffer;
     (void)buflen;
+
+    // save transfer context (on others its done in hardware)
+    g_xfer.dev_addr  = dev_addr;
+    g_xfer.ep_addr   = ep_addr;
+    g_xfer.total_len = buflen;
+    g_xfer.in        = (ep_addr & 0x80) ? true : false;
+    g_xfer.busy      = true;
+
+    // program hardware registers here
+
     return false;
 }
 
