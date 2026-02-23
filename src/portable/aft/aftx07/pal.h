@@ -31,6 +31,7 @@
 #define CLINT_BASE          ((uint32_t)0x90010000)
 #define DMA_BASE            ((uint32_t)0x90001000)
 #define UART_BASE           ((uint32_t)0x90002000)
+#define USB_HOST_BASE       ((uint32_t)0x90003000)
 #define PLIC_BASE           ((uint32_t)0xA0000000)
 
 // IO Mux alternate pin functions

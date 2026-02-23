@@ -30,9 +30,9 @@
 // usb register definitions in /hw/mcu/intel/de2_115/usb_pal.h
 // board support package  in /hw/bsp/intel/de2_115/
 
+#include "pal.h"
 #include "tusb_option.h"
 #include "usb_pal.h"
-#include "pal.h"
 
 // #if CFG_TUH_ENABLED && CFG_TUSB_MCU == OPT_MCU_NONE
 
@@ -42,11 +42,11 @@
 #include <stdint.h>
 
 typedef struct {
-    bool busy;
-    uint8_t dev_addr;
-    uint8_t ep_addr;      // includes direction bit
-    uint16_t total_len;
-    bool in;              // direction (true = IN)
+  bool busy;
+  uint8_t dev_addr;
+  uint8_t ep_addr;// includes direction bit
+  uint16_t total_len;
+  bool in;// direction (true = IN)
 } usb_xfer_ctx_t;
 
 static volatile usb_xfer_ctx_t g_xfer;
@@ -56,245 +56,229 @@ static volatile usb_xfer_ctx_t g_xfer;
 //--------------------------------------------------------------------+
 
 // optional hcd configuration, called by tuh_configure()
-bool hcd_configure(uint8_t rhport, uint32_t cfg_id, const void *cfg_param)
-{
-    (void)rhport;
-    (void)cfg_id;
-    (void)cfg_param;
-    return false;
+bool hcd_configure(uint8_t rhport, uint32_t cfg_id, const void *cfg_param) {
+  (void) rhport;
+  (void) cfg_id;
+  (void) cfg_param;
+  return false;
 }
 
 // Initialize controller to host mode
-bool hcd_init(uint8_t rhport, const tusb_rhport_init_t *rh_init)
-{
-    (void)rhport;
-    (void)rh_init;
+bool hcd_init(uint8_t rhport, const tusb_rhport_init_t *rh_init) {
+  (void) rhport;
+  (void) rh_init;
 
-    // 1. Reset and Flush the internal FIFO buffer
-    // Setting tx_flush ensures the 256-byte buffer is empty before we start
-    USB_HOST->CTRL.bits.tx_flush = 1;
+  // 1. Reset and Flush the internal FIFO buffer
+  // Setting tx_flush ensures the 256-byte buffer is empty before we start
+  USB_HOST->CTRL.bits.tx_flush = 1;
 
-    // 2. Configure the UTMI PHY for Host Mode
-    // - phy_opmode: 0 (Normal Operation)
-    // - phy_xcvrselect: 1 (Full Speed)
-    // - phy_termselect: 1 (Enable termination for FS host)
-    // - phy_dppulldown/phy_dmpulldown: 1 (Enable pulldowns as required for a Host)
-    USB_HOST->CTRL.bits.phy_opmode = 0;
-    USB_HOST->CTRL.bits.phy_xcvrselect = 1;
-    USB_HOST->CTRL.bits.phy_termselect = 1;
-    USB_HOST->CTRL.bits.phy_dppulldown = 1;
-    USB_HOST->CTRL.bits.phy_dmpulldown = 1;
+  // 2. Configure the UTMI PHY for Host Mode
+  // - phy_opmode: 0 (Normal Operation)
+  // - phy_xcvrselect: 1 (Full Speed)
+  // - phy_termselect: 1 (Enable termination for FS host)
+  // - phy_dppulldown/phy_dmpulldown: 1 (Enable pulldowns as required for a Host)
+  USB_HOST->CTRL.bits.phy_opmode = 0;
+  USB_HOST->CTRL.bits.phy_xcvrselect = 1;
+  USB_HOST->CTRL.bits.phy_termselect = 1;
+  USB_HOST->CTRL.bits.phy_dppulldown = 1;
+  USB_HOST->CTRL.bits.phy_dmpulldown = 1;
 
-    // 3. Disable SOF generation initially
-    // We only want to start sending Start of Frame packets after a device is detected
-    USB_HOST->CTRL.bits.enable_sof = 0;
+  // 3. Disable SOF generation initially
+  // We only want to start sending Start of Frame packets after a device is detected
+  USB_HOST->CTRL.bits.enable_sof = 0;
 
-    // 4. Clear any pending interrupts and mask them
-    // We clear by writing the current status back to the ACK register
-    USB_HOST->IRQ_ACK.val = USB_HOST->IRQ_STS.val;
-    USB_HOST->IRQ_MASK.val = 0; // Keep interrupts disabled until hcd_int_enable is called
+  // 4. Clear any pending interrupts and mask them
+  // We clear by writing the current status back to the ACK register
+  USB_HOST->IRQ_ACK.val = USB_HOST->IRQ_STS.val;
+  USB_HOST->IRQ_MASK.val = 0;// Keep interrupts disabled until hcd_int_enable is called
 
-    return true;
+  return true;
 }
 
 // Interrupt Handler
-void hcd_int_handler(uint8_t rhport, bool in_isr)
-{
-    (void)rhport;
-    (void)in_isr;
+void hcd_int_handler(uint8_t rhport, bool in_isr) {
+  (void) rhport;
+  (void) in_isr;
 
-    // read IRQ_STS to see what kind of interrupt was fired
-    uint32_t interrupt_status = USB_HOST->IRQ_STS.val & USB_HOST->IRQ_MASK.val;
+  // read IRQ_STS to see what kind of interrupt was fired
+  uint32_t interrupt_status = USB_HOST->IRQ_STS.val & USB_HOST->IRQ_MASK.val;
 
-    // device detected
-    if (interrupt_status & USB_IRQ_DEVICE_DETECT){
-        if (USB_HOST->STATUS.bits.linestate != 0){
-            hcd_event_device_attach(rhport, in_isr); // tusb helper function to notify upper layers of event
-        }
-
-        USB_HOST->IRQ_ACK.val = USB_IRQ_DEVICE_DETECT; // clear interrupt
-    }
-    
-    // DONE interrupt (when transfer completed), notify TUSB and read USB_RX_STAT
-
-    if (interrupt_status & USB_IRQ_DONE){
-        // Read USB_RX_STAT to determine parameters for hcd_event_xfer_complete
-        // hcd_event_xfer_complete(uint8_t dev_addr, uint8_t ep_addr, uint32_t xferred_bytes, xfer_result_t result, bool in_isr)
-        // hcd_event_xfer_complete tells TinyUSB, transfer finished, here is result and how many bytes transferred (notifies host stack hardware is done)
-        uint32_t rx_stat = USB_HOST->RX_STAT.val;
-        xfer_result_t result = XFER_RESULT_SUCCESS;
-
-        // check error flags in RX_STAT
-        if (rx_stat & (1u << 30)){         // CRC ERROR
-            result = XFER_RESULT_FAILED;
-        } else if (rx_stat & (1u << 29)){  // RESP_TIMEOUT
-            result = XFER_RESULT_FAILED;
-        } else {
-            uint8_t resp_pid = (rx_stat >> 16) & 0xFF; // RESP_BITS
-
-            if(resp_pid == 0x1E){ // STALL: 0001_1110 [3:0] is the actual PID [7:4] is the complement
-                result = XFER_RESULT_STALLED;
-            }
-        }
-
-        // determine transferred length
-        uint16_t actual_len = 0;
-
-        if(g_xfer.in){
-            // IN transfers, use the recieved count
-            actual_len = (uint16_t)(rx_stat & 0xFFFF);
-        } else {
-            // OUT transfers assume full length on success
-            if (result == XFER_RESULT_SUCCESS){
-                actual_len = g_xfer.total_len;
-            } else {
-                actual_len = 0;
-            }
-        }
-
-        // tell TUSB
-        if (g_xfer.busy){
-            hcd_event_xfer_complete(
-                g_xfer.dev_addr,
-                g_xfer.ep_addr,
-                actual_len,
-                result,
-                in_isr
-            );
-            g_xfer.busy = false;
-        }
-
-        // ACK interrupt
-        USB_HOST->IRQ_ACK.val = USB_IRQ_DONE;
+  // device detected
+  if (interrupt_status & USB_IRQ_DEVICE_DETECT) {
+    if (USB_HOST->STATUS.bits.linestate != 0) {
+      hcd_event_device_attach(rhport, in_isr);// tusb helper function to notify upper layers of event
     }
 
+    USB_HOST->IRQ_ACK.val = USB_IRQ_DEVICE_DETECT;// clear interrupt
+  }
 
-    // ERROR interrupt
-}
+  // DONE interrupt (when transfer completed), notify TUSB and read USB_RX_STAT
+
+  if (interrupt_status & USB_IRQ_DONE) {
+    // Read USB_RX_STAT to determine parameters for hcd_event_xfer_complete
+    // hcd_event_xfer_complete(uint8_t dev_addr, uint8_t ep_addr, uint32_t xferred_bytes, xfer_result_t result, bool in_isr)
+    // hcd_event_xfer_complete tells TinyUSB, transfer finished, here is result and how many bytes transferred (notifies host stack hardware is done)
+    uint32_t rx_stat = USB_HOST->RX_STAT.val;
+    xfer_result_t result = XFER_RESULT_SUCCESS;
+
+    // check error flags in RX_STAT
+    if (rx_stat & (1u << 30)) {// CRC ERROR
+      result = XFER_RESULT_FAILED;
+    } else if (rx_stat & (1u << 29)) {// RESP_TIMEOUT
+      result = XFER_RESULT_FAILED;
+    } else {
+      uint8_t resp_pid = (rx_stat >> 16) & 0xFF;// RESP_BITS
+
+      if (resp_pid == 0x1E) {// STALL: 0001_1110 [3:0] is the actual PID [7:4] is the complement
+        result = XFER_RESULT_STALLED;
+      }
+    }
+
+    // determine transferred length
+    uint16_t actual_len = 0;
+
+    if (g_xfer.in) {
+      // IN transfers, use the recieved count
+      actual_len = (uint16_t) (rx_stat & 0xFFFF);
+    } else {
+      // OUT transfers assume full length on success
+      if (result == XFER_RESULT_SUCCESS) {
+        actual_len = g_xfer.total_len;
+      } else {
+        actual_len = 0;
+      }
+    }
+
+    // tell TUSB
+    if (g_xfer.busy) {
+      hcd_event_xfer_complete(
+          g_xfer.dev_addr,
+          g_xfer.ep_addr,
+          actual_len,
+          result,
+          in_isr);
+      g_xfer.busy = false;
+    }
+
+    // ACK interrupt
+    USB_HOST->IRQ_ACK.val = USB_IRQ_DONE;
+  }
+
+
+  // ERROR interrupt
 
 // Enable USB interrupt
-void hcd_int_enable(uint8_t rhport)
-{
-    (void)rhport;
+void hcd_int_enable(uint8_t rhport) {
+  (void) rhport;
 
-    // USB peripheral interrupt enabled
-    // interrupt controller is configured (PLIC)
-    // CPU global interrupts enabled
-    uint32_t usb_mask = USB_IRQ_DEVICE_DETECT | USB_IRQ_DONE | USB_IRQ_ERR | USB_IRQ_SOF;
-    USB_HOST->IRQ_ACK.val  = usb_mask; // clear out interrupts
-    USB_HOST->IRQ_MASK.val = usb_mask; // enable all interrupts
+  // USB peripheral interrupt enabled
+  // interrupt controller is configured (PLIC)
+  // CPU global interrupts enabled
+  uint32_t usb_mask = USB_IRQ_DEVICE_DETECT | USB_IRQ_DONE | USB_IRQ_ERR | USB_IRQ_SOF;
+  USB_HOST->IRQ_ACK.val = usb_mask; // clear out interrupts
+  USB_HOST->IRQ_MASK.val = usb_mask;// enable all interrupts
 
-    // enable PLIC source
-    uint32_t src = USB_PLIC_SRC;
-    uint32_t ctx = 0;
-    
-    // make > 0 or it wont fire
-    *PLIC_PRIORITY(PLIC_BASE, src) = 1;
+  // enable PLIC source
+  uint32_t src = USB_PLIC_SRC;
+  uint32_t ctx = 0;
 
-    // enable bit (32 bit word covers 32 sources)
-    volatile uint32_t *en = PLIC_ENABLE(PLIC_BASE, src, ctx);
-    *en |= (1u << (src % 32));
+  // make > 0 or it wont fire
+  *PLIC_PRIORITY(PLIC_BASE, src) = 1;
 
-    // allow priorities >= 1
-    *PLIC_PRIORITY_THRESHOLD(PLIC_BASE, ctx) = 0;
+  // enable bit (32 bit word covers 32 sources)
+  volatile uint32_t *en = PLIC_ENABLE(PLIC_BASE, src, ctx);
+  *en |= (1u << (src % 32));
+
+  // allow priorities >= 1
+  *PLIC_PRIORITY_THRESHOLD(PLIC_BASE, ctx) = 0;
 }
 
 // Disable USB interrupt
-void hcd_int_disable(uint8_t rhport)
-{
-    (void)rhport;
+void hcd_int_disable(uint8_t rhport) {
+  (void) rhport;
 }
 
 // Get frame number (1ms)
-uint32_t hcd_frame_number(uint8_t rhport)
-{
-    (void)rhport;
-    return 0;
+uint32_t hcd_frame_number(uint8_t rhport) {
+  (void) rhport;
+  return USB_HOST->STATUS.bits.sof_time;
 }
 
 //--------------------------------------------------------------------+
 // Port API
 //--------------------------------------------------------------------+
 
-bool hcd_port_connect_status(uint8_t rhport)
-{
-    (void)rhport;
+bool hcd_port_connect_status(uint8_t rhport) {
+  (void) rhport;
 
-    // Read the current line state from the hardware status register
-    // linestate bits: 01 = D+ high (Full Speed device), 10 = D- high (Low Speed device)
-    uint32_t line_state = USB_HOST->STATUS.bits.linestate;
+  // Read the current line state from the hardware status register
+  // linestate bits: 01 = D+ high (Full Speed device), 10 = D- high (Low Speed device)
+  uint32_t line_state = USB_HOST->STATUS.bits.linestate;
 
-    // A non-zero value means the lines are not in Single Ended Zero (SE0) state,
-    // indicating that a device pull-up is present and detected.
-    return (line_state != 0);
+  // A non-zero value means the lines are not in Single Ended Zero (SE0) state,
+  // indicating that a device pull-up is present and detected.
+  return (line_state != 0);
 }
 
 // Reset USB bus on the port. Return immediately, bus reset sequence may not be complete.
 // Some port would require hcd_port_reset_end() to be invoked after 10ms to complete the reset sequence.
-void hcd_port_reset(uint8_t rhport)
-{
-    (void)rhport;
+void hcd_port_reset(uint8_t rhport) {
+  (void) rhport;
 
-    // 1. Enter SE0 (Reset) mode
-    // Based on hardware documentation, phy_opmode = 2 (binary 10) drives the lines to SE0.
-    // We also ensure pulldowns are active and SOF is disabled during reset.
-    USB_HOST->CTRL.bits.phy_opmode = 2;
-    USB_HOST->CTRL.bits.enable_sof = 0;
-    USB_HOST->CTRL.bits.phy_termselect = 0;
-    USB_HOST->CTRL.bits.phy_xcvrselect = 0;
+  // 1. Enter SE0 (Reset) mode
+  // Based on hardware documentation, phy_opmode = 2 (binary 10) drives the lines to SE0.
+  // We also ensure pulldowns are active and SOF is disabled during reset.
+  USB_HOST->CTRL.bits.phy_opmode = 2;
+  USB_HOST->CTRL.bits.enable_sof = 0;
+  USB_HOST->CTRL.bits.phy_termselect = 0;
+  USB_HOST->CTRL.bits.phy_xcvrselect = 0;
 }
 
 // Complete bus reset sequence, may be required by some controllers
-void hcd_port_reset_end(uint8_t rhport)
-{
-    (void)rhport;
+void hcd_port_reset_end(uint8_t rhport) {
+  (void) rhport;
 
-    // 1. Return to Normal Operation mode
-    // Setting phy_opmode back to 0 (binary 00) stops driving SE0.
-    USB_HOST->CTRL.bits.phy_opmode = 0;
+  // 1. Return to Normal Operation mode
+  // Setting phy_opmode back to 0 (binary 00) stops driving SE0.
+  USB_HOST->CTRL.bits.phy_opmode = 0;
 
-    // 2. Re-enable termination and select Full Speed for the root hub
-    USB_HOST->CTRL.bits.phy_termselect = 1;
-    USB_HOST->CTRL.bits.phy_xcvrselect = 1;
+  // 2. Re-enable termination and select Full Speed for the root hub
+  USB_HOST->CTRL.bits.phy_termselect = 1;
+  USB_HOST->CTRL.bits.phy_xcvrselect = 1;
 
-    // 3. Flush the FIFO to ensure we start with a clean state for enumeration
-    USB_HOST->CTRL.bits.tx_flush = 1;
+  // 3. Flush the FIFO to ensure we start with a clean state for enumeration
+  USB_HOST->CTRL.bits.tx_flush = 1;
 
-    // enable SOF packets on wire
-    USB_HOST->CTRL.bits.enable_sof = 1; // enable SOF packet generation
-
+  // enable SOF packets on wire
+  USB_HOST->CTRL.bits.enable_sof = 1;// enable SOF packet generation
 }
 
 // Get port link speed
-tusb_speed_t hcd_port_speed_get(uint8_t rhport)
-{
-    (void)rhport;
+tusb_speed_t hcd_port_speed_get(uint8_t rhport) {
+  (void) rhport;
 
-    // Read the linestate from the status register
-    // Based on your pal: bit 0 is D+ and bit 1 is D-
-    uint32_t line_state = USB_HOST->STATUS.bits.linestate;
+  // Read the linestate from the status register
+  // Based on your pal: bit 0 is D+ and bit 1 is D-
+  uint32_t line_state = USB_HOST->STATUS.bits.linestate;
 
-    // Check bit 0 (D+). If high, it is a Full Speed device.
-    if (line_state & 0x01)
-    {
-        return TUSB_SPEED_FULL;
-    }
-
-    // Check bit 1 (D-). If high, it is a Low Speed device.
-    if (line_state & 0x02)
-    {
-        return TUSB_SPEED_LOW;
-    }
-
-    // Default to Full Speed if state is ambiguous
+  // Check bit 0 (D+). If high, it is a Full Speed device.
+  if (line_state & 0x01) {
     return TUSB_SPEED_FULL;
+  }
+
+  // Check bit 1 (D-). If high, it is a Low Speed device.
+  if (line_state & 0x02) {
+    return TUSB_SPEED_LOW;
+  }
+
+  // Default to Full Speed if state is ambiguous
+  return TUSB_SPEED_FULL;
 }
 
 // HCD closes all opened endpoints belong to this device
-void hcd_device_close(uint8_t rhport, uint8_t dev_addr)
-{
-    (void)rhport;
-    (void)dev_addr;
+void hcd_device_close(uint8_t rhport, uint8_t dev_addr) {
+  (void) rhport;
+  (void) dev_addr;
 }
 
 //--------------------------------------------------------------------+
@@ -302,74 +286,101 @@ void hcd_device_close(uint8_t rhport, uint8_t dev_addr)
 //--------------------------------------------------------------------+
 
 // Open an endpoint
-bool hcd_edpt_open(uint8_t rhport, uint8_t dev_addr, tusb_desc_endpoint_t const *ep_desc)
-{
-    (void)rhport;
-    (void)dev_addr;
-    (void)ep_desc;
+bool hcd_edpt_open(uint8_t rhport, uint8_t dev_addr, tusb_desc_endpoint_t const *ep_desc) {
+  (void) rhport;
+  (void) dev_addr;
+  (void) ep_desc;
 
-    // NOTE: ep_desc is allocated on the stack when called from usbh_edpt_control_open()
-    // You need to copy the data into a local variable who maintains the state of the endpoint and transfer.
-    // Check _hcd_data in hcd_dwc2.c for example.
-
-    return false;
+  // NOTE: ep_desc is allocated on the stack when called from usbh_edpt_control_open()
+  // You need to copy the data into a local variable who maintains the state of the endpoint and transfer.
+  // Check _hcd_data in hcd_dwc2.c for example.
+    
+  return false;
 }
 
-bool hcd_edpt_close(uint8_t rhport, uint8_t daddr, uint8_t ep_addr)
-{
-    (void)rhport;
-    (void)daddr;
-    (void)ep_addr;
-    return false; // TODO not implemented yet
+bool hcd_edpt_close(uint8_t rhport, uint8_t daddr, uint8_t ep_addr) {
+  (void) rhport;
+  (void) daddr;
+  (void) ep_addr;
+  return false;// TODO not implemented yet
 }
 
 // Submit a transfer, when complete hcd_event_xfer_complete() must be invoked
-bool hcd_edpt_xfer(uint8_t rhport, uint8_t dev_addr, uint8_t ep_addr, uint8_t *buffer, uint16_t buflen)
-{
-    (void)rhport;
-    (void)dev_addr;
-    (void)ep_addr;
-    (void)buffer;
-    (void)buflen;
+bool hcd_edpt_xfer(uint8_t rhport, uint8_t dev_addr, uint8_t ep_addr, uint8_t *buffer, uint16_t buflen) {
+  (void) rhport;
+  (void) dev_addr;
+  (void) ep_addr;
+  (void) buffer;
+  (void) buflen;
 
-    // save transfer context (on others its done in hardware)
-    g_xfer.dev_addr  = dev_addr;
-    g_xfer.ep_addr   = ep_addr;
-    g_xfer.total_len = buflen;
-    g_xfer.in        = (ep_addr & 0x80) ? true : false;
-    g_xfer.busy      = true;
+  // save transfer context (on others its done in hardware)
+  g_xfer.dev_addr = dev_addr;
+  g_xfer.ep_addr = ep_addr;
+  g_xfer.total_len = buflen;
+  g_xfer.in = (ep_addr & 0x80) ? true : false;
+  g_xfer.busy = true;
 
-    // program hardware registers here
+  // program hardware registers here
 
-    return false;
+  return false;
 }
 
 // Abort a queued transfer. Note: it can only abort transfer that has not been started
 // Return true if a queued transfer is aborted, false if there is no transfer to abort
-bool hcd_edpt_abort_xfer(uint8_t rhport, uint8_t dev_addr, uint8_t ep_addr)
-{
-    (void)rhport;
-    (void)dev_addr;
-    (void)ep_addr;
-    return false;
+bool hcd_edpt_abort_xfer(uint8_t rhport, uint8_t dev_addr, uint8_t ep_addr) {
+  (void) rhport;
+  (void) dev_addr;
+  (void) ep_addr;
+
+  // Aborting a transfer on this IP would involve flushing the FIFO
+  // if the transfer hasn't started yet.
+  USB_HOST->CTRL.bits.tx_flush = 1;
+  return true;
 }
 
 // Submit a special transfer to send 8-byte Setup Packet, when complete hcd_event_xfer_complete() must be invoked
-bool hcd_setup_send(uint8_t rhport, uint8_t dev_addr, uint8_t const setup_packet[8])
-{
-    (void)rhport;
-    (void)dev_addr;
-    (void)setup_packet;
-    return false;
+bool hcd_setup_send(uint8_t rhport, uint8_t dev_addr, uint8_t const setup_packet[8]) {
+  (void) rhport;
+  // 1. Flush the TX FIFO to ensure it is clean for the new packet
+  USB_HOST->CTRL.bits.tx_flush = 1;
+
+  // 2. Write the 8-byte setup packet to the DATA FIFO
+  for (int i = 0; i < 8; i++) {
+    USB_HOST->DATA = setup_packet[i];
+  }
+
+  // 3. Set the transfer length to 8 bytes
+  USB_HOST->XFER_DATA = 8;
+  // 4. Configure and trigger the SETUP token
+  // - SETUP packets always use PID 0x2D
+  // - SETUP packets are always sent to Endpoint 0
+  // - SETUP packets always start with DATA0 toggle (pid_datax = 0)
+  // - SETUP packets require an ACK handshake (ack = 1)
+  usb_token_bits_t token = {0};
+  token.pid_bits = USB_PID_SETUP;
+  token.dev_addr = dev_addr;
+  token.ep_addr = 0;
+  token.pid_datax = 0;
+  token.ack = 1;
+  token.in_xfer = 0;// Setup is Host -> Device
+  token.start = 1;  // Trigger the hardware
+
+  USB_HOST->XFER_TOKEN.bits = token;
+
+  return true;
 }
 
 // clear stall, data toggle is also reset to DATA0
-bool hcd_edpt_clear_stall(uint8_t rhport, uint8_t dev_addr, uint8_t ep_addr)
-{
-    (void)rhport;
-    (void)dev_addr;
-    (void)ep_addr;
-    return false;
+bool hcd_edpt_clear_stall(uint8_t rhport, uint8_t dev_addr, uint8_t ep_addr) {
+  (void) rhport;
+  (void) dev_addr;
+  (void) ep_addr;
+
+  // Since the hardware allows us to specify the toggle (DATA0/DATA1)
+  // in every token, we don't need to reset a hardware-side toggle bit here.
+  // The TinyUSB stack will handle resetting its internal toggle state
+  // to DATA0 after this returns true.
+  return true;
 }
 
 // #endif
