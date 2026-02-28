@@ -1,28 +1,28 @@
 /*
- * The MIT License (MIT)
- *
- * Copyright (c) 2023 Ha Thach (tinyusb.org)
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to deal
- * in the Software without restriction, including without limitation the rights
- * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
- * copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in
- * all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
- * THE SOFTWARE.
- *
- * This file is part of the TinyUSB stack.
- */
+  * The MIT License (MIT)
+  *
+  * Copyright (c) 2023 Ha Thach (tinyusb.org)
+  *
+  * Permission is hereby granted, free of charge, to any person obtaining a copy
+  * of this software and associated documentation files (the "Software"), to deal
+  * in the Software without restriction, including without limitation the rights
+  * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  * copies of the Software, and to permit persons to whom the Software is
+  * furnished to do so, subject to the following conditions:
+  *
+  * The above copyright notice and this permission notice shall be included in
+  * all copies or substantial portions of the Software.
+  *
+  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+  * THE SOFTWARE.
+  *
+  * This file is part of the TinyUSB stack.
+  */
 
 // HCD file following example: /src/portable/<vendor>/<chip_family>/hcd_<chip_family>.c
 // /src/portable/aft/aftx07/hcd_aftx07.c
@@ -34,7 +34,7 @@
 #include "tusb_option.h"
 #include "usb_pal.h"
 
-// #if CFG_TUH_ENABLED && CFG_TUSB_MCU == OPT_MCU_NONE
+#if CFG_TUH_ENABLED && CFG_TUSB_MCU == OPT_MCU_NONE
 
 #include "host/hcd.h"
 #include "host/usbh.h"
@@ -46,6 +46,7 @@ typedef struct {
   uint8_t dev_addr;
   uint8_t ep_addr;// includes direction bit
   uint16_t total_len;
+  uint8_t *buffer;
   bool in;// direction (true = IN)
 } usb_xfer_ctx_t;
 
@@ -97,75 +98,86 @@ bool hcd_init(uint8_t rhport, const tusb_rhport_init_t *rh_init) {
 
 // Interrupt Handler
 void hcd_int_handler(uint8_t rhport, bool in_isr) {
-  (void) rhport;
-  (void) in_isr;
+  // 1. Read the masked interrupt status
+  uint32_t status = USB_HOST->IRQ_STS.val & USB_HOST->IRQ_MASK.val;
 
-  // read IRQ_STS to see what kind of interrupt was fired
-  uint32_t interrupt_status = USB_HOST->IRQ_STS.val & USB_HOST->IRQ_MASK.val;
-
-  // device detected
-  if (interrupt_status & USB_IRQ_DEVICE_DETECT) {
-    if (USB_HOST->STATUS.bits.linestate != 0) {
-      hcd_event_device_attach(rhport, in_isr);// tusb helper function to notify upper layers of event
+  // 2. Handle Device Detection (Attach/Detach)
+  if (status & USB_IRQ_DEVICE_DETECT) {
+    uint32_t linestate = USB_HOST->STATUS.bits.linestate;
+    
+    if (linestate != 0) {
+      // Device attached (D+ or D- is high)
+      hcd_event_device_attach(rhport, in_isr);
+    } else {
+      // Device detached (Both lines low)
+      hcd_event_device_remove(rhport, in_isr);
     }
-
-    USB_HOST->IRQ_ACK.val = USB_IRQ_DEVICE_DETECT;// clear interrupt
+    // W1C: Acknowledge the interrupt
+    USB_HOST->IRQ_ACK.val = USB_IRQ_DEVICE_DETECT;
   }
 
-  // DONE interrupt (when transfer completed), notify TUSB and read USB_RX_STAT
-
-  if (interrupt_status & USB_IRQ_DONE) {
-    // Read USB_RX_STAT to determine parameters for hcd_event_xfer_complete
-    // hcd_event_xfer_complete(uint8_t dev_addr, uint8_t ep_addr, uint32_t xferred_bytes, xfer_result_t result, bool in_isr)
-    // hcd_event_xfer_complete tells TinyUSB, transfer finished, here is result and how many bytes transferred (notifies host stack hardware is done)
-    uint32_t rx_stat = USB_HOST->RX_STAT.val;
+  // 3. Handle Transfer Completion (DONE)
+  if (status & USB_IRQ_DONE) {
+    uint32_t rx_stat_val = USB_HOST->RX_STAT.val;
     xfer_result_t result = XFER_RESULT_SUCCESS;
+    uint32_t actual_len = 0;
 
-    // check error flags in RX_STAT
-    if (rx_stat & (1u << 30)) {// CRC ERROR
+    // Check for hardware-level errors in RX_STAT
+    if (rx_stat_val & (1u << 30)) { // CRC_ERR
       result = XFER_RESULT_FAILED;
-    } else if (rx_stat & (1u << 29)) {// RESP_TIMEOUT
+    } else if (rx_stat_val & (1u << 29)) { // RESP_TIMEOUT
       result = XFER_RESULT_FAILED;
     } else {
-      uint8_t resp_pid = (rx_stat >> 16) & 0xFF;// RESP_BITS
-
-      if (resp_pid == 0x1E) {// STALL: 0001_1110 [3:0] is the actual PID [7:4] is the complement
+      // Check PID for STALL
+      uint8_t resp_pid = (uint8_t)((rx_stat_val >> 16) & 0xFF);
+      if (resp_pid == 0x1E) { // STALL PID
         result = XFER_RESULT_STALLED;
       }
     }
 
-    // determine transferred length
-    uint16_t actual_len = 0;
-
-    if (g_xfer.in) {
-      // IN transfers, use the recieved count
-      actual_len = (uint16_t) (rx_stat & 0xFFFF);
-    } else {
-      // OUT transfers assume full length on success
-      if (result == XFER_RESULT_SUCCESS) {
-        actual_len = g_xfer.total_len;
-      } else {
-        actual_len = 0;
-      }
-    }
-
-    // tell TUSB
     if (g_xfer.busy) {
-      hcd_event_xfer_complete(
-          g_xfer.dev_addr,
-          g_xfer.ep_addr,
-          actual_len,
-          result,
-          in_isr);
+      if (g_xfer.in) {
+        // IN Transfer: Read bytes from FIFO into the software buffer
+        actual_len = (uint32_t)(rx_stat_val & 0xFFFF); // COUNT bits
+        for (uint32_t i = 0; i < actual_len; i++) {
+          g_xfer.buffer[i] = (uint8_t)USB_HOST->DATA;
+        }
+      } else {
+        // OUT/SETUP Transfer: Assume full length was sent on success
+        actual_len = (result == XFER_RESULT_SUCCESS) ? g_xfer.total_len : 0;
+      }
+
+      // Notify TinyUSB stack of completion
+      hcd_event_xfer_complete(g_xfer.dev_addr, g_xfer.ep_addr, actual_len, result, in_isr);
       g_xfer.busy = false;
     }
 
-    // ACK interrupt
+    // W1C: Acknowledge the interrupt
     USB_HOST->IRQ_ACK.val = USB_IRQ_DONE;
   }
 
+  // 4. Handle General Hardware Errors
+  if (status & USB_IRQ_ERR) {
+    // Clear the internal FIFO to recover from the error state
+    USB_HOST->CTRL.bits.tx_flush = 1;
+    
+    if (g_xfer.busy) {
+      hcd_event_xfer_complete(g_xfer.dev_addr, g_xfer.ep_addr, 0, XFER_RESULT_FAILED, in_isr);
+      g_xfer.busy = false;
+    }
+    
+    // W1C: Acknowledge the interrupt
+    USB_HOST->IRQ_ACK.val = USB_IRQ_ERR;
+  }
 
-  // ERROR interrupt
+  // 5. Handle SOF (Keep-alive) - Usually just cleared
+  if (status & USB_IRQ_SOF) {
+    USB_HOST->IRQ_ACK.val = USB_IRQ_SOF;
+  }
+}
+
+
+// ERROR interrupt
 
 // Enable USB interrupt
 void hcd_int_enable(uint8_t rhport) {
@@ -289,13 +301,12 @@ void hcd_device_close(uint8_t rhport, uint8_t dev_addr) {
 bool hcd_edpt_open(uint8_t rhport, uint8_t dev_addr, tusb_desc_endpoint_t const *ep_desc) {
   (void) rhport;
   (void) dev_addr;
-  (void) ep_desc;
 
   // NOTE: ep_desc is allocated on the stack when called from usbh_edpt_control_open()
   // You need to copy the data into a local variable who maintains the state of the endpoint and transfer.
   // Check _hcd_data in hcd_dwc2.c for example.
-    
-  return false;
+
+  return true;
 }
 
 bool hcd_edpt_close(uint8_t rhport, uint8_t daddr, uint8_t ep_addr) {
@@ -321,8 +332,26 @@ bool hcd_edpt_xfer(uint8_t rhport, uint8_t dev_addr, uint8_t ep_addr, uint8_t *b
   g_xfer.busy = true;
 
   // program hardware registers here
+  if (!g_xfer.in && buflen > 0) {
+    USB_HOST->CTRL.bits.tx_flush = 1;
+    for (uint16_t i = 0; i < buflen; i++) {
+      USB_HOST->DATA = buffer[i];// Load OUT data into FIFO
+    }
+  }
 
-  return false;
+  USB_HOST->XFER_DATA = buflen;// Set length for the hardware
+
+  usb_token_bits_t token = {0};
+  token.dev_addr = dev_addr;
+  token.ep_addr = ep_addr & 0x0F;
+  token.in_xfer = g_xfer.in ? 1 : 0;
+  token.ack = 1;
+  token.pid_bits = g_xfer.in ? USB_PID_IN : USB_PID_OUT;//
+  token.pid_datax = usbh_get_toggle(dev_addr, ep_addr); // Helper needed to track DATA0/DATA1
+  token.start = 1;                                      // Kick off state machine
+
+  USB_HOST->XFER_TOKEN.bits = token;
+  return true;
 }
 
 // Abort a queued transfer. Note: it can only abort transfer that has not been started
@@ -341,32 +370,30 @@ bool hcd_edpt_abort_xfer(uint8_t rhport, uint8_t dev_addr, uint8_t ep_addr) {
 // Submit a special transfer to send 8-byte Setup Packet, when complete hcd_event_xfer_complete() must be invoked
 bool hcd_setup_send(uint8_t rhport, uint8_t dev_addr, uint8_t const setup_packet[8]) {
   (void) rhport;
-  // 1. Flush the TX FIFO to ensure it is clean for the new packet
-  USB_HOST->CTRL.bits.tx_flush = 1;
+  // Initialize global transfer context for the interrupt handler
+  g_xfer.dev_addr = dev_addr;
+  g_xfer.ep_addr  = 0;
+  g_xfer.total_len = 8;
+  g_xfer.in       = false;
+  g_xfer.busy     = true;
 
-  // 2. Write the 8-byte setup packet to the DATA FIFO
+  USB_HOST->CTRL.bits.tx_flush = 1;
   for (int i = 0; i < 8; i++) {
     USB_HOST->DATA = setup_packet[i];
   }
 
-  // 3. Set the transfer length to 8 bytes
   USB_HOST->XFER_DATA = 8;
-  // 4. Configure and trigger the SETUP token
-  // - SETUP packets always use PID 0x2D
-  // - SETUP packets are always sent to Endpoint 0
-  // - SETUP packets always start with DATA0 toggle (pid_datax = 0)
-  // - SETUP packets require an ACK handshake (ack = 1)
+
   usb_token_bits_t token = {0};
   token.pid_bits = USB_PID_SETUP;
   token.dev_addr = dev_addr;
-  token.ep_addr = 0;
-  token.pid_datax = 0;
-  token.ack = 1;
-  token.in_xfer = 0;// Setup is Host -> Device
-  token.start = 1;  // Trigger the hardware
+  token.ep_addr  = 0;
+  token.pid_datax = 0; // Setup always uses DATA0
+  token.ack       = 1;
+  token.in_xfer   = 0;
+  token.start     = 1;
 
   USB_HOST->XFER_TOKEN.bits = token;
-
   return true;
 }
 
@@ -383,4 +410,4 @@ bool hcd_edpt_clear_stall(uint8_t rhport, uint8_t dev_addr, uint8_t ep_addr) {
   return true;
 }
 
-// #endif
+#endif

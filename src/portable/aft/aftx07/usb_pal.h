@@ -101,12 +101,37 @@ typedef struct {
   __IO uint32_t DATA; /* 0x20 - FIFO access point */
 } USB_Host_Type;
 
+/* --- Register Offsets --- */
+#define USB_REG_OFS_CTRL       0x00
+#define USB_REG_OFS_STATUS     0x04
+#define USB_REG_OFS_IRQ_ACK    0x08
+#define USB_REG_OFS_IRQ_STS    0x0C
+#define USB_REG_OFS_IRQ_MASK   0x10
+#define USB_REG_OFS_XFER_DATA  0x14
+#define USB_REG_OFS_XFER_TOKEN 0x18
+#define USB_REG_OFS_RX_STAT    0x1C
+#define USB_REG_OFS_DATA       0x20
 
-#define USB_HOST_BASE ((uint32_t) 0x90003000) // tentative given base address for USB host registers, update when you know the actual address for sure
-#define USB_HOST ((USB_Host_Type *) USB_HOST_BASE)
+/* --- Hardware Access Macros --- */
+#ifdef USB_TESTBENCH
+  // In simulation, route reads/writes to the Verilator AHB C++ wrapper
+  extern void usbhw_reg_write(uint32_t addr, uint32_t data);
+  extern uint32_t usbhw_reg_read(uint32_t addr);
+
+  // We pass the raw offset directly to the simulator
+  #define USB_HW_WRITE(offset, data) usbhw_reg_write((offset), (data))
+  #define USB_HW_READ(offset)        usbhw_reg_read((offset))
+
+#else
+  // Real CPU hardware address base
+  #define USB_HOST_BASE ((uint32_t)0x90003000)
+
+  // In hardware, write to the physical memory address
+  #define USB_HW_WRITE(offset, data) (*(volatile uint32_t*)(USB_HOST_BASE + (offset)) = (data))
+  #define USB_HW_READ(offset)        (*(volatile uint32_t*)(USB_HOST_BASE + (offset)))
+#endif
 
 /* --- Interrupt Masks --- */
-
 #define USB_IRQ_SOF (1 << 0)
 #define USB_IRQ_DONE (1 << 1)
 #define USB_IRQ_ERR (1 << 2)
@@ -117,4 +142,4 @@ typedef struct {
 #define USB_PID_OUT 0xE1
 #define USB_PID_IN 0x69
 
-#endif
+#endif // USB_PAL_H_

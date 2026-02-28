@@ -132,7 +132,7 @@
 #define DMA_SR_ERROR    (1<<1)
 
 #define N_INTS 64 // make sure this value matches the NUM_INTERRUPTS param in aftx07.sv
-
+#define USB_PLIC_SRC (17)
 // IRQ mappings
 enum IRQMap {
     Dflt  = 0,
