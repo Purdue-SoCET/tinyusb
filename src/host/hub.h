@@ -28,7 +28,7 @@
 #define TUSB_HUB_H_
 
 #include "common/tusb_common.h"
-
+#include "host/usbh.h"
 #ifdef __cplusplus
  extern "C" {
 #endif

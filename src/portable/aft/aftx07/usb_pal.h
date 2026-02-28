@@ -71,13 +71,20 @@ typedef struct {
 
 /* --- Hardware Access Macros --- */
 #ifdef USB_TESTBENCH
+  #ifdef __cplusplus
+  extern "C" {
+  #endif
+  
   extern void usbhw_reg_write(uint32_t addr, uint32_t data);
   extern uint32_t usbhw_reg_read(uint32_t addr);
+  
+  #ifdef __cplusplus
+  }
+  #endif
 
   // Directly pass the offset into Verilator
   #define USB_HW_WRITE(offset, data) usbhw_reg_write((offset), (data))
   #define USB_HW_READ(offset)        usbhw_reg_read((offset))
-
 #else
   // Real CPU hardware address base
   #define USB_HOST_BASE ((uint32_t)0x90003000)
