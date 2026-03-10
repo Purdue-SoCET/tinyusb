@@ -60,6 +60,11 @@ void hcd_int_handler(uint8_t rhport, bool in_isr) {
     usb_status_bits_t *hw_stat = (usb_status_bits_t*)&raw_status;
     
     if (hw_stat->linestate != 0) {
+      // ADD THIS: Print 'A' for Attach directly to the MMIO printer
+      volatile uint32_t *printer = (uint32_t *)0xb0000000;
+      *printer = 'A';
+      *printer = '\n';
+      
       hcd_event_device_attach(rhport, in_isr);
     } else {
       hcd_event_device_remove(rhport, in_isr);
